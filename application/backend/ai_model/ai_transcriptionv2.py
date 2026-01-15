@@ -14,9 +14,11 @@ import google.generativeai as genai
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
 
+# Load backend-specific environment variables.
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
 DEFAULT_KEY_PATH = os.path.join(os.path.dirname(__file__), "google_key.json")
+# Resolve Google credentials, falling back to a local key file when needed.
 credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 if credentials_path and not os.path.exists(credentials_path):
     print(f"Credentials file not found at {credentials_path}; falling back to {DEFAULT_KEY_PATH}", flush=True)
@@ -69,6 +71,7 @@ def audio_callback(indata, frames, time_info, status):
 
 
 def ensure_stream() -> None:
+    # Ensure a single active input stream for recording.
     global audio_stream
     if audio_stream is None:
         audio_stream = sd.InputStream(
@@ -81,7 +84,8 @@ def ensure_stream() -> None:
 
 
 def send_cors_headers(handler: BaseHTTPRequestHandler) -> None:
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    # Allow browser-based frontend requests.
+    handler.send_header("Access-Control-Allow-Origin", "*")                 #request HTTP endpoint
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
     handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
@@ -134,6 +138,7 @@ def _recognize_chunk(samples: np.ndarray) -> Dict[str, Any]:
 
 
 def transcribe_audio(samples: np.ndarray) -> Dict[str, Any]:
+    # Chunk long recordings to avoid oversized STT requests.
     if samples.size == 0:
         return {"text": "", "language": None}
 
@@ -156,6 +161,7 @@ def transcribe_audio(samples: np.ndarray) -> Dict[str, Any]:
 
 
 def _extract_text(response) -> tuple[str, Optional[int]]:
+    # Extract text from genai response without relying on response.text.
     summary_text = ""
     finish_reason = None
 
@@ -245,6 +251,7 @@ def _generate_text_with_model(
 
 
 def summarize_transcript(transcript: str) -> str:
+    # Summarize transcript with chunking and fallbacks.
     if not SUMMARY_API_KEY:
         raise ValueError("Missing GOOGLE_SUMMARY_KEY for summarization.")
 
@@ -340,6 +347,7 @@ def _fallback_title_text(transcript: str, max_words: int = 12) -> str:
 
 
 def generate_title(transcript: str) -> str:
+    # Create a short title from the transcript text.
     text = transcript.strip()
     if not text:
         return "New Recording"
