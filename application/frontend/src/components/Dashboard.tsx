@@ -50,7 +50,7 @@ interface Note {
 }
 
 type DashboardProps = {
-  apiBaseUrl?: string;
+  apiBaseUrl?: string; // Python backend URL (e.g., http://localhost:8000)
 };
 
 type TranscriptionResult = {
@@ -80,70 +80,23 @@ function rowToNote(row: NoteRow): Note {
 }
 
 /**
- * Summariser via backend (Gemini key stays server-side).
+ * Simple local summarization (first 200 characters).
  */
-async function summarizeWithAI(transcript: string, apiBaseUrl: string): Promise<string> {
-  const t = transcript.trim();
+function generateSimpleSummary(text: string): string {
+  const t = text.trim();
   if (!t) return "No transcript text available.";
-
-  try {
-    const response = await fetch(`${apiBaseUrl}/summarize`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ transcript: t }),
-    });
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = typeof payload.error === "string" ? payload.error : "Summarisation failed";
-      throw new Error(message);
-    }
-
-    if (typeof payload.summary !== "string") {
-      throw new Error("Invalid summary response");
-    }
-
-    return payload.summary;
-  } catch (error) {
-    if (error instanceof TypeError && error.message.includes("fetch")) {
-      throw new Error(
-        `Cannot connect to AI API at ${apiBaseUrl}. Please ensure VITE_AI_API_URL is set correctly and the backend server is running.`
-      );
-    }
-    throw error;
-  }
+  if (t.length <= 200) return t;
+  return t.substring(0, 200) + "...";
 }
 
-async function generateTitleWithAI(transcript: string, apiBaseUrl: string): Promise<string> {
+/**
+ * Generate title from transcript (first few words).
+ */
+function generateTitleFromTranscript(transcript: string): string {
   const t = transcript.trim();
   if (!t) return "New Recording";
-
-  try {
-    const response = await fetch(`${apiBaseUrl}/title`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ transcript: t }),
-    });
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = typeof payload.error === "string" ? payload.error : "Title generation failed";
-      throw new Error(message);
-    }
-
-    if (typeof payload.title !== "string") {
-      throw new Error("Invalid title response");
-    }
-
-    return payload.title;
-  } catch (error) {
-    if (error instanceof TypeError && error.message.includes("fetch")) {
-      throw new Error(
-        `Cannot connect to AI API at ${apiBaseUrl}. Please ensure VITE_AI_API_URL is set correctly and the backend server is running.`
-      );
-    }
-    throw error;
-  }
+  const words = t.split(/\s+/).slice(0, 6);
+  return words.join(" ") || "New Recording";
 }
 
 export function Dashboard({ apiBaseUrl }: DashboardProps) {
@@ -165,13 +118,14 @@ export function Dashboard({ apiBaseUrl }: DashboardProps) {
   const [summarising, setSummarising] = useState(false);
   const [summariseError, setSummariseError] = useState<string | null>(null);
 
-  const aiApiBaseUrl = apiBaseUrl ?? import.meta.env.VITE_AI_API_URL ?? "http://localhost:8000";
+  // Python backend URL (Google Speech-to-Text via ai_transcriptionv2.py)
+  const backendUrl = apiBaseUrl ?? import.meta.env.VITE_BACKEND_URL ?? "http://localhost:8000";
   
-  // Check if API URL is configured in production
+  // Check if backend URL is configured
   useEffect(() => {
-    if (!import.meta.env.DEV && !import.meta.env.VITE_AI_API_URL && !apiBaseUrl) {
-      console.error(
-        "VITE_AI_API_URL is not configured. Please set it in your Vercel environment variables."
+    if (!import.meta.env.DEV && !import.meta.env.VITE_BACKEND_URL && !apiBaseUrl) {
+      console.warn(
+        "VITE_BACKEND_URL is not configured. Using default http://localhost:8000. Make sure the Python backend is running."
       );
     }
   }, [apiBaseUrl]);
@@ -253,7 +207,7 @@ export function Dashboard({ apiBaseUrl }: DashboardProps) {
 
   const startBackendRecording = async () => {
     try {
-      const response = await fetch(`${aiApiBaseUrl}/record/start`, { method: "POST" });
+      const response = await fetch(`${backendUrl}/record/start`, { method: "POST" });
       const payload = await response.json().catch(() => ({}));
 
       if (!response.ok) {
@@ -263,7 +217,7 @@ export function Dashboard({ apiBaseUrl }: DashboardProps) {
     } catch (error) {
       if (error instanceof TypeError && error.message.includes("fetch")) {
         throw new Error(
-          `Cannot connect to AI API at ${aiApiBaseUrl}. Please ensure VITE_AI_API_URL is set correctly and the backend server is running.`
+          `Cannot connect to Python backend at ${backendUrl}. Please ensure VITE_BACKEND_URL is set correctly and the Python server (ai_transcriptionv2.py) is running.`
         );
       }
       throw error;
@@ -272,7 +226,7 @@ export function Dashboard({ apiBaseUrl }: DashboardProps) {
 
   const stopBackendRecording = async (): Promise<TranscriptionResult> => {
     try {
-      const response = await fetch(`${aiApiBaseUrl}/record/stop`, { method: "POST" });
+      const response = await fetch(`${backendUrl}/record/stop`, { method: "POST" });
       const payload = await response.json().catch(() => ({}));
 
       if (!response.ok) {
@@ -284,12 +238,12 @@ export function Dashboard({ apiBaseUrl }: DashboardProps) {
         text: typeof payload.text === "string" ? payload.text : "",
         language: typeof payload.language === "string" ? payload.language : undefined,
         duration_seconds: typeof payload.duration_seconds === "number" ? payload.duration_seconds : undefined,
-        title: typeof payload.title === "string" ? payload.title : undefined,
+        title: undefined, // Python backend doesn't provide title
       };
     } catch (error) {
       if (error instanceof TypeError && error.message.includes("fetch")) {
         throw new Error(
-          `Cannot connect to AI API at ${aiApiBaseUrl}. Please ensure VITE_AI_API_URL is set correctly and the backend server is running.`
+          `Cannot connect to Python backend at ${backendUrl}. Please ensure VITE_BACKEND_URL is set correctly and the Python server (ai_transcriptionv2.py) is running.`
         );
       }
       throw error;
@@ -333,15 +287,8 @@ export function Dashboard({ apiBaseUrl }: DashboardProps) {
         const transcription = await stopBackendRecording();
         const transcriptText = transcription.text.trim();
 
-        let title = transcription.title?.trim() ?? "";
-        if (!title && transcriptText) {
-          try {
-            title = await generateTitleWithAI(transcriptText, aiApiBaseUrl);
-          } catch {
-            title = transcriptText.split(/\s+/).slice(0, 6).join(" ");
-          }
-        }
-        if (!title) title = "New Recording";
+        // Generate title locally from transcript
+        const title = transcriptText ? generateTitleFromTranscript(transcriptText) : "New Recording";
 
         const duration = formatDuration(transcription.duration_seconds ?? durationSeconds);
 
@@ -385,7 +332,8 @@ export function Dashboard({ apiBaseUrl }: DashboardProps) {
       const note = notes.find((n) => n.id === noteId);
       if (!note) throw new Error("Note not found");
 
-      const summaryText = await summarizeWithAI(note.content, aiApiBaseUrl);
+      // Simple local summarization (first 200 chars)
+      const summaryText = generateSimpleSummary(note.content);
 
       const { data: existing, error: existErr } = await supabase
         .from("summaries")
