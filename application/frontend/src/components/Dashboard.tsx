@@ -16,7 +16,7 @@ import {
   Zap,
   X,
 } from "lucide-react";
-import { supabase } from "../lib/supabase";
+import { supabase } from "@/lib/supabase";
 
 type RecordingState = "idle" | "recording" | "processing" | "complete" | "error";
 
@@ -50,7 +50,7 @@ interface Note {
 }
 
 type DashboardProps = {
-  apiBaseUrl?: string;
+  apiBaseUrl?: string; // Python backend URL (e.g., http://localhost:8000)
 };
 
 type TranscriptionResult = {
@@ -80,52 +80,23 @@ function rowToNote(row: NoteRow): Note {
 }
 
 /**
- * Summariser via backend (Gemini key stays server-side).
+ * Simple local summarization (first 200 characters).
  */
-async function summarizeWithAI(transcript: string, apiBaseUrl: string): Promise<string> {
-  const t = transcript.trim();
+function generateSimpleSummary(text: string): string {
+  const t = text.trim();
   if (!t) return "No transcript text available.";
-
-  const response = await fetch(`${apiBaseUrl}/summarize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ transcript: t }),
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const message = typeof payload.error === "string" ? payload.error : "Summarisation failed";
-    throw new Error(message);
-  }
-
-  if (typeof payload.summary !== "string") {
-    throw new Error("Invalid summary response");
-  }
-
-  return payload.summary;
+  if (t.length <= 200) return t;
+  return t.substring(0, 200) + "...";
 }
 
-async function generateTitleWithAI(transcript: string, apiBaseUrl: string): Promise<string> {
+/**
+ * Generate title from transcript (first few words).
+ */
+function generateTitleFromTranscript(transcript: string): string {
   const t = transcript.trim();
   if (!t) return "New Recording";
-
-  const response = await fetch(`${apiBaseUrl}/title`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ transcript: t }),
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const message = typeof payload.error === "string" ? payload.error : "Title generation failed";
-    throw new Error(message);
-  }
-
-  if (typeof payload.title !== "string") {
-    throw new Error("Invalid title response");
-  }
-
-  return payload.title;
+  const words = t.split(/\s+/).slice(0, 6);
+  return words.join(" ") || "New Recording";
 }
 
 export function Dashboard({ apiBaseUrl }: DashboardProps) {
@@ -147,7 +118,17 @@ export function Dashboard({ apiBaseUrl }: DashboardProps) {
   const [summarising, setSummarising] = useState(false);
   const [summariseError, setSummariseError] = useState<string | null>(null);
 
-  const aiApiBaseUrl = apiBaseUrl ?? import.meta.env.VITE_AI_API_URL ?? "http://localhost:8000";
+  // Python backend URL (Google Speech-to-Text via ai_transcriptionv2.py)
+  const backendUrl = apiBaseUrl ?? import.meta.env.VITE_BACKEND_URL ?? "http://localhost:8000";
+  
+  // Check if backend URL is configured
+  useEffect(() => {
+    if (!import.meta.env.DEV && !import.meta.env.VITE_BACKEND_URL && !apiBaseUrl) {
+      console.warn(
+        "VITE_BACKEND_URL is not configured. Using default http://localhost:8000. Make sure the Python backend is running."
+      );
+    }
+  }, [apiBaseUrl]);
 
   const getUserId = async (): Promise<string> => {
     const { data, error } = await supabase.auth.getUser();
@@ -225,30 +206,48 @@ export function Dashboard({ apiBaseUrl }: DashboardProps) {
   }, [recordingState]);
 
   const startBackendRecording = async () => {
-    const response = await fetch(`${aiApiBaseUrl}/record/start`, { method: "POST" });
-    const payload = await response.json().catch(() => ({}));
+    try {
+      const response = await fetch(`${backendUrl}/record/start`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
 
-    if (!response.ok) {
-      const message = typeof payload.error === "string" ? payload.error : "Failed to start recording";
-      throw new Error(message);
+      if (!response.ok) {
+        const message = typeof payload.error === "string" ? payload.error : "Failed to start recording";
+        throw new Error(message);
+      }
+    } catch (error) {
+      if (error instanceof TypeError && error.message.includes("fetch")) {
+        throw new Error(
+          `Cannot connect to Python backend at ${backendUrl}. Please ensure VITE_BACKEND_URL is set correctly and the Python server (ai_transcriptionv2.py) is running.`
+        );
+      }
+      throw error;
     }
   };
 
   const stopBackendRecording = async (): Promise<TranscriptionResult> => {
-    const response = await fetch(`${aiApiBaseUrl}/record/stop`, { method: "POST" });
-    const payload = await response.json().catch(() => ({}));
+    try {
+      const response = await fetch(`${backendUrl}/record/stop`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
 
-    if (!response.ok) {
-      const message = typeof payload.error === "string" ? payload.error : "Failed to stop recording";
-      throw new Error(message);
+      if (!response.ok) {
+        const message = typeof payload.error === "string" ? payload.error : "Failed to stop recording";
+        throw new Error(message);
+      }
+
+      return {
+        text: typeof payload.text === "string" ? payload.text : "",
+        language: typeof payload.language === "string" ? payload.language : undefined,
+        duration_seconds: typeof payload.duration_seconds === "number" ? payload.duration_seconds : undefined,
+        title: undefined, // Python backend doesn't provide title
+      };
+    } catch (error) {
+      if (error instanceof TypeError && error.message.includes("fetch")) {
+        throw new Error(
+          `Cannot connect to Python backend at ${backendUrl}. Please ensure VITE_BACKEND_URL is set correctly and the Python server (ai_transcriptionv2.py) is running.`
+        );
+      }
+      throw error;
     }
-
-    return {
-      text: typeof payload.text === "string" ? payload.text : "",
-      language: typeof payload.language === "string" ? payload.language : undefined,
-      duration_seconds: typeof payload.duration_seconds === "number" ? payload.duration_seconds : undefined,
-      title: typeof payload.title === "string" ? payload.title : undefined,
-    };
   };
 
   const createNoteInSupabase = async (payload: { title: string; content: string; duration: string }) => {
@@ -288,15 +287,8 @@ export function Dashboard({ apiBaseUrl }: DashboardProps) {
         const transcription = await stopBackendRecording();
         const transcriptText = transcription.text.trim();
 
-        let title = transcription.title?.trim() ?? "";
-        if (!title && transcriptText) {
-          try {
-            title = await generateTitleWithAI(transcriptText, aiApiBaseUrl);
-          } catch {
-            title = transcriptText.split(/\s+/).slice(0, 6).join(" ");
-          }
-        }
-        if (!title) title = "New Recording";
+        // Generate title locally from transcript
+        const title = transcriptText ? generateTitleFromTranscript(transcriptText) : "New Recording";
 
         const duration = formatDuration(transcription.duration_seconds ?? durationSeconds);
 
@@ -340,7 +332,8 @@ export function Dashboard({ apiBaseUrl }: DashboardProps) {
       const note = notes.find((n) => n.id === noteId);
       if (!note) throw new Error("Note not found");
 
-      const summaryText = await summarizeWithAI(note.content, aiApiBaseUrl);
+      // Simple local summarization (first 200 chars)
+      const summaryText = generateSimpleSummary(note.content);
 
       const { data: existing, error: existErr } = await supabase
         .from("summaries")
